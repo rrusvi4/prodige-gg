@@ -3857,6 +3857,17 @@ const CREDIT_REWARDS = {
   "Banni à vie": 40,
 };
 
+// MVP de la saison — reconnaissance intermédiaire décernée au bilan de saison (pas seulement
+// au titre de fin). Seuils volontairement en dessous de ceux de "Légende absolue" dans
+// computeEnding (reputation>=78 && mental>=68 && skill>=72) : un bon résultat de mi-carrière,
+// atteignable plusieurs fois, pas garanti.
+const MVP_SEASON_THRESHOLDS = { skill: 62, reputation: 58, mental: 45, health: 40 };
+const MVP_SEASON_CREDIT_REWARD = 30;
+
+function qualifiesForSeasonMvp(s) {
+  return STAT_DEFS.every((def) => s[def.key] >= MVP_SEASON_THRESHOLDS[def.key]);
+}
+
 const COSMETICS = [
   { id: "accent_gold", type: "accent", label: "Gold Classique", value: "#C8A24B", cost: 0 },
   { id: "accent_teal", type: "accent", label: "Édition Glacier", value: "#4FBFAE", cost: 300 },
@@ -4870,7 +4881,7 @@ function GameScreen({ discipline, game, role, age, stats, deltas, event, onChoic
    ÉCRAN : BILAN DE SAISON — point d'étape toutes les 2 ans (6 tours), entièrement dérivé
    des deltas déjà suivis dans choiceHistory, sans texte à écrire à la main.
 --------------------------------------------------------- */
-function SeasonRecapScreen({ discipline, game, role, age, stats, team, growthProfile, choiceHistory, soundOn, onToggleSound, onContinue }) {
+function SeasonRecapScreen({ discipline, game, role, age, stats, team, growthProfile, choiceHistory, soundOn, onToggleSound, onContinue, mvpAwarded }) {
   const disc = DISCIPLINES.find((d) => d.id === discipline);
   const gameInfo = (GAMES[discipline] || []).find((g) => g.id === game);
   const roleInfo = (ROLES[game] || []).find((r) => r.id === role);
@@ -4955,6 +4966,16 @@ function SeasonRecapScreen({ discipline, game, role, age, stats, team, growthPro
       {/* CENTRE : TENDANCE + MOMENTS MARQUANTS */}
       <div className="relative flex-1 overflow-y-auto flex items-center justify-center px-4 sm:px-8 py-8">
         <div className="w-full max-w-xl flex flex-col gap-4 content-in">
+          {mvpAwarded && (
+            <div className="flex items-center gap-2 px-4 py-3" style={{ background: "#23262D", borderLeft: "3px solid #C8A24B" }}>
+              <Trophy size={16} style={{ color: "#C8A24B" }} className="shrink-0" />
+              <span className="text-sm" style={{ color: "#DCDEE3" }}>
+                <span className="font-semibold" style={{ color: "#C8A24B" }}>MVP de la saison</span> — tes stats
+                dominent sur toute la ligne. +{MVP_SEASON_CREDIT_REWARD}{" "}
+                <span style={{ color: "#C8A24B" }}>Crédits Prodige</span>
+              </span>
+            </div>
+          )}
           <HudPanel>
             <div className="p-6 sm:p-8">
               <TickLabel
@@ -5037,7 +5058,7 @@ const RECONVERSION_TEXT = {
   analyste: "Aujourd'hui, c'est au micro que tu vis ta passion, à décortiquer les stars de demain.",
 };
 
-function EndScreen({ ending, stats, age, onRestart, rival, team, reconversion, growthProfile, choiceHistory, creditsEarned, statHistory }) {
+function EndScreen({ ending, stats, age, onRestart, rival, team, reconversion, growthProfile, choiceHistory, creditsEarned, statHistory, mvpCount }) {
   const teamMeta = getTeamMeta(team);
   const isLegend = ending.title === "Légende absolue";
   const keyMoments = (choiceHistory || [])
@@ -5122,6 +5143,14 @@ function EndScreen({ ending, stats, age, onRestart, rival, team, reconversion, g
             <Sparkles size={12} className="shrink-0" style={{ color: "#A99BD9" }} />
             <span className="text-[11px]" style={{ color: "#9A9DA8" }}>
               Profil de carrière : <span className="font-semibold" style={{ color: "#A99BD9" }}>{growthProfile.label}</span>
+            </span>
+          </div>
+        )}
+        {mvpCount > 0 && (
+          <div className="flex items-center gap-1.5 mb-6 mt-1">
+            <Trophy size={12} className="shrink-0" style={{ color: "#C8A24B" }} />
+            <span className="text-[11px]" style={{ color: "#9A9DA8" }}>
+              MVP de la saison × <span className="font-semibold" style={{ color: "#C8A24B" }}>{mvpCount}</span>
             </span>
           </div>
         )}
@@ -6036,6 +6065,11 @@ export default function EsportCareerGame() {
   // Un instantané des 4 stats à chaque tour, pour tracer la courbe d'évolution sur l'écran de fin.
   const [statHistory, setStatHistory] = useState([{ turn: 0, skill: 50, mental: 50, reputation: 50, health: 50 }]);
   const [creditsEarned, setCreditsEarned] = useState(0);
+  // MVP de la saison : total de la carrière en cours, dernière saison où il a été décerné
+  // (pour éviter deux saisons MVP d'affilée), et indicateur transitoire pour le bilan affiché.
+  const [mvpCount, setMvpCount] = useState(0);
+  const [lastMvpSeason, setLastMvpSeason] = useState(null);
+  const [seasonMvpAwarded, setSeasonMvpAwarded] = useState(false);
   const [turnIndex, setTurnIndex] = useState(0);
   const [phase, setPhase] = useState("event");
   const [lastResult, setLastResult] = useState("");
@@ -6187,6 +6221,9 @@ export default function EsportCareerGame() {
     setChoiceHistory([]);
     setStatHistory([{ turn: 0, skill: 50, mental: 50, reputation: 50, health: 50 }]);
     setCreditsEarned(0);
+    setMvpCount(0);
+    setLastMvpSeason(null);
+    setSeasonMvpAwarded(false);
     setTurnIndex(0);
     setPhase("event");
     setLastResult("");
@@ -6229,6 +6266,7 @@ export default function EsportCareerGame() {
       stats: finalStats,
       minStats: minStatsAtEnd,
       age: finalAge,
+      mvpCount,
       endingTitle: endingObj.title,
       endingTone: endingObj.tone,
       reconversionUsed: null,
@@ -6322,6 +6360,14 @@ export default function EsportCareerGame() {
     if (nextTurn % 6 === 0) {
       // Saison de 6 tours (2 ans) bouclée — turnIndex avance seulement en quittant le bilan,
       // pour que l'écran de bilan affiche encore les 6 derniers choix de choiceHistory.
+      const seasonIndex = nextTurn / 6;
+      const awarded = qualifiesForSeasonMvp(stats) && seasonIndex - (lastMvpSeason ?? -2) >= 2;
+      if (awarded) {
+        setMvpCount((c) => c + 1);
+        setLastMvpSeason(seasonIndex);
+        awardCredits(MVP_SEASON_CREDIT_REWARD);
+      }
+      setSeasonMvpAwarded(awarded);
       setPhase("season");
     } else {
       setTurnIndex((i) => i + 1);
@@ -6552,11 +6598,12 @@ export default function EsportCareerGame() {
           soundOn={soundOn}
           onToggleSound={handleToggleSound}
           onContinue={handleContinueFromSeason}
+          mvpAwarded={seasonMvpAwarded}
         />
       )}
 
       {screen === "end" && ending && (
-        <EndScreen ending={ending} stats={stats} age={age} onRestart={resetAll} rival={rival} team={team} reconversion={flags.reconversion} growthProfile={growthProfile} choiceHistory={choiceHistory} creditsEarned={creditsEarned} statHistory={statHistory} />
+        <EndScreen ending={ending} stats={stats} age={age} onRestart={resetAll} rival={rival} team={team} reconversion={flags.reconversion} growthProfile={growthProfile} choiceHistory={choiceHistory} creditsEarned={creditsEarned} statHistory={statHistory} mvpCount={mvpCount} />
       )}
 
       {screen === "coach-game" && coachBase && (
