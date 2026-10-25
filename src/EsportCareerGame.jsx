@@ -691,6 +691,130 @@ const LEAGUES = {
   r6: ["North America League", "EMEA League", "APAC League", "South America League"],
 };
 
+// Circuits compétitifs par jeu — "open" : beaucoup de tournois ouverts (CS2) ; "closed" : ligue
+// fermée où il faut être signé (LoL, CoD). Un jeu absent d'ici n'affiche aucun résultat de tournoi.
+const CIRCUITS = {
+  cs2: {
+    kind: "open",
+    pools: {
+      amateur: ["FACEIT Cup", "Qualif. ouverte ESL", "Cup régionale ESEA", "LAN locale"],
+      semi: ["ESL Challenger", "CCT Series", "BLAST Open", "Elisa Invitational"],
+      pro: ["IEM Katowice", "BLAST Premier", "ESL Pro League", "IEM Cologne", "PGL Major"],
+    },
+  },
+  lol: {
+    kind: "closed",
+    amateurName: "Ligue Challengers",
+    regular: "Saison régulière",
+    playoffs: "Playoffs",
+    intl: [
+      { name: "MSI", maxRank: 2 },
+      { name: "Worlds", maxRank: 3 },
+    ],
+  },
+  cod: {
+    kind: "closed",
+    amateurName: "Challengers CDL",
+    leagueName: "Call of Duty League",
+    regular: "Majors de la saison",
+    playoffs: "CDL Championship",
+    standalonePlayoffs: true,
+    intl: [],
+  },
+};
+
+// Même ligue pour tous les événements d'une carrière (sinon un événement dit "LCK" et le
+// palmarès "LEC") : tirée une fois à partir de la graine de la carrière.
+function pickCareerLeague(game, seed) {
+  const cfg = CIRCUITS[game];
+  if (cfg && cfg.leagueName) return cfg.leagueName;
+  const list = LEAGUES[game];
+  if (!list) return null;
+  return list[Math.floor(makeRng(seed + 7)() * list.length)];
+}
+
+const CIRCUIT_DIFFICULTY = { amateur: 52, semi: 60, pro: 66 };
+const CIRCUIT_TIER_LABELS = { amateur: "Circuit amateur", semi: "Circuit semi-pro", pro: "Circuit pro" };
+const PLACEMENTS = [
+  { min: 20, rank: 1, label: "Vainqueur" },
+  { min: 12, rank: 2, label: "Finaliste" },
+  { min: 4, rank: 3, label: "Top 4" },
+  { min: -6, rank: 4, label: "Top 8" },
+  { min: -Infinity, rank: 5, label: "Phase de groupes" },
+];
+
+function circuitTier(team, flags) {
+  return flags.wentPro === true ? "pro" : team ? "semi" : "amateur";
+}
+
+function circuitScore(stats, tier, bonus = 0) {
+  const force = 0.45 * stats.skill + 0.2 * stats.mental + 0.2 * stats.reputation + 0.15 * stats.health;
+  // Bruit triangulaire (±30) : un favori perd parfois, un outsider gagne parfois, comme en vrai.
+  return force - CIRCUIT_DIFFICULTY[tier] - bonus + (Math.random() + Math.random() - 1) * 30;
+}
+
+function placementFor(score) {
+  const p = PLACEMENTS.find((x) => score >= x.min);
+  return { placement: p.label, rank: p.rank };
+}
+
+function placementColor(rank) {
+  return rank === 1 ? "#C8A24B" : rank === 2 ? "#B8BAC2" : rank === 3 ? "#D9924A" : "#6B6E78";
+}
+
+// Résultats des 2 ans qui viennent de s'écouler. Renvoie [] pour un jeu sans circuit défini.
+function simulateCircuitSeason(game, stats, team, flags, league, startAge) {
+  const cfg = CIRCUITS[game];
+  if (!cfg) return [];
+  const tier = circuitTier(team, flags);
+  const tierLabel = CIRCUIT_TIER_LABELS[tier];
+  const rows = [];
+
+  if (cfg.kind === "open") {
+    const pool = seededShuffle(cfg.pools[tier], Math.random).slice(0, 4);
+    pool.forEach((name, i) => {
+      const bonus = /Major/.test(name) ? 4 : 0;
+      rows.push({
+        name,
+        tier: tierLabel,
+        age: startAge + Math.floor(i / 2),
+        ...placementFor(circuitScore(stats, tier, bonus)),
+      });
+    });
+    return rows;
+  }
+
+  for (let y = 0; y < 2; y++) {
+    const age = startAge + y;
+    if (tier !== "pro") {
+      rows.push({ name: cfg.amateurName, tier: tierLabel, age, ...placementFor(circuitScore(stats, tier)) });
+      continue;
+    }
+    const regularScore = circuitScore(stats, tier);
+    const place = Math.max(1, Math.min(10, Math.round(6 - regularScore / 3)));
+    rows.push({
+      name: `${league} · ${cfg.regular}`,
+      tier: tierLabel,
+      age,
+      placement: place === 1 ? "1re place" : `${place}e place`,
+      rank: place === 1 ? 1 : place <= 2 ? 2 : place <= 4 ? 3 : place <= 8 ? 4 : 5,
+      regular: true,
+    });
+    const playoffs = placementFor(circuitScore(stats, tier));
+    rows.push({
+      name: cfg.standalonePlayoffs ? cfg.playoffs : `${league} · ${cfg.playoffs}`,
+      tier: tierLabel,
+      age,
+      ...playoffs,
+    });
+    const intl = cfg.intl[y];
+    if (intl && playoffs.rank <= intl.maxRank) {
+      rows.push({ name: intl.name, tier: tierLabel, age, ...placementFor(circuitScore(stats, tier, 4)) });
+    }
+  }
+  return rows;
+}
+
 // Villes hôtes possibles pour les grands rendez-vous (Majors, Finales mondiales...) — pour que
 // deux carrières, même sur le même jeu, ne se jouent jamais dans la même salle devant le même public.
 const CITIES = [
@@ -4680,7 +4804,7 @@ function RoleSelectScreen({ game, onSelect, onBack }) {
 /* ---------------------------------------------------------
    ÉCRAN : JEU PRINCIPAL
 --------------------------------------------------------- */
-function GameScreen({ discipline, game, role, age, stats, deltas, event, onChoice, phase, lastResult, onContinue, turnIndex, total, rival, ally, team, growthProfile, soundOn, onToggleSound }) {
+function GameScreen({ discipline, game, role, age, stats, deltas, event, onChoice, phase, lastResult, onContinue, turnIndex, total, rival, ally, team, growthProfile, soundOn, onToggleSound, careerLeague }) {
   const disc = DISCIPLINES.find((d) => d.id === discipline);
   const gameInfo = (GAMES[discipline] || []).find((g) => g.id === game);
   const roleInfo = (ROLES[game] || []).find((r) => r.id === role);
@@ -4699,10 +4823,10 @@ function GameScreen({ discipline, game, role, age, stats, deltas, event, onChoic
 
   const leagueOffer = useMemo(() => {
     if (event.dynamic === "league") {
-      return pickRandom(LEAGUES[game] || ["ligue régionale"]);
+      return careerLeague || pickRandom(LEAGUES[game] || ["ligue régionale"]);
     }
     return null;
-  }, [turnIndex, game, event.dynamic]);
+  }, [turnIndex, game, event.dynamic, careerLeague]);
 
   // Un adversaire réel (tiré du roster du jeu, jamais ta propre équipe) et un lieu, pour que
   // les grands moments (Majors, finales mondiales...) ne se ressemblent jamais deux fois de suite.
@@ -4881,7 +5005,7 @@ function GameScreen({ discipline, game, role, age, stats, deltas, event, onChoic
    ÉCRAN : BILAN DE SAISON — point d'étape toutes les 2 ans (6 tours), entièrement dérivé
    des deltas déjà suivis dans choiceHistory, sans texte à écrire à la main.
 --------------------------------------------------------- */
-function SeasonRecapScreen({ discipline, game, role, age, stats, team, growthProfile, choiceHistory, soundOn, onToggleSound, onContinue, mvpAwarded }) {
+function SeasonRecapScreen({ discipline, game, role, age, stats, team, growthProfile, choiceHistory, soundOn, onToggleSound, onContinue, mvpAwarded, results }) {
   const disc = DISCIPLINES.find((d) => d.id === discipline);
   const gameInfo = (GAMES[discipline] || []).find((g) => g.id === game);
   const roleInfo = (ROLES[game] || []).find((r) => r.id === role);
@@ -5003,6 +5127,42 @@ function SeasonRecapScreen({ discipline, game, role, age, stats, team, growthPro
             </div>
           </HudPanel>
 
+          {results && results.length > 0 && (
+            <HudPanel>
+              <div className="p-4 sm:p-5">
+                <TickLabel
+                  className="text-[10px] uppercase tracking-[0.3em] mb-3"
+                  color={accentColor}
+                  style={{ color: accentColor, fontFamily: "'JetBrains Mono', monospace" }}
+                >
+                  Résultats de la saison
+                </TickLabel>
+                <div className="flex flex-col gap-2">
+                  {results.map((r, i) => (
+                    <div key={i} className="flex items-center justify-between gap-3">
+                      <div className="min-w-0">
+                        <div className="text-sm truncate" style={{ color: "#DCDEE3" }}>{r.name}</div>
+                        <div className="text-[10px] uppercase tracking-widest" style={{ color: "#6B6E78" }}>
+                          {r.tier} · {r.age} ans
+                        </div>
+                      </div>
+                      <span
+                        className="shrink-0 text-[11px] font-bold px-2 py-0.5"
+                        style={{
+                          color: placementColor(r.rank),
+                          border: `1px solid ${placementColor(r.rank)}`,
+                          fontFamily: "'JetBrains Mono', monospace",
+                        }}
+                      >
+                        {r.placement}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </HudPanel>
+          )}
+
           {topMoments.length > 0 && (
             <div className="flex flex-col gap-2">
               {topMoments.map((moment, i) => (
@@ -5058,8 +5218,15 @@ const RECONVERSION_TEXT = {
   analyste: "Aujourd'hui, c'est au micro que tu vis ta passion, à décortiquer les stars de demain.",
 };
 
-function EndScreen({ ending, stats, age, onRestart, rival, team, reconversion, growthProfile, choiceHistory, creditsEarned, statHistory, mvpCount }) {
+function EndScreen({ ending, stats, age, onRestart, rival, team, reconversion, growthProfile, choiceHistory, creditsEarned, statHistory, mvpCount, palmares }) {
   const teamMeta = getTeamMeta(team);
+  const trophyRows = (palmares || []).filter((r) => !r.regular);
+  const titles = trophyRows.filter((r) => r.rank === 1).length;
+  const finals = trophyRows.filter((r) => r.rank === 2).length;
+  const bestResults = trophyRows
+    .slice()
+    .sort((a, b) => a.rank - b.rank)
+    .slice(0, 5);
   const isLegend = ending.title === "Légende absolue";
   const keyMoments = (choiceHistory || [])
     .slice()
@@ -5231,6 +5398,28 @@ function EndScreen({ ending, stats, age, onRestart, rival, team, reconversion, g
                 </HudPanel>
               ))}
             </div>
+          </div>
+        )}
+
+        {trophyRows.length > 0 && (
+          <div className="w-full max-w-sm mb-8 text-left">
+            <TickLabel className="text-[10px] uppercase tracking-widest mb-3 justify-center" style={{ color: "#6B6E78" }}>
+              Palmarès · {titles} titre{titles > 1 ? "s" : ""} · {finals} finale{finals > 1 ? "s" : ""}
+            </TickLabel>
+            <HudPanel>
+              <div className="p-3 flex flex-col gap-2">
+                {bestResults.map((r, i) => (
+                  <div key={i} className="flex items-center justify-between gap-3">
+                    <span className="text-xs truncate" style={{ color: "#DCDEE3" }}>
+                      {r.name} <span style={{ color: "#6B6E78" }}>· {r.age} ans</span>
+                    </span>
+                    <span className="shrink-0 text-[10px] font-bold" style={{ color: placementColor(r.rank), fontFamily: "'JetBrains Mono', monospace" }}>
+                      {r.placement}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </HudPanel>
           </div>
         )}
 
@@ -6070,6 +6259,9 @@ export default function EsportCareerGame() {
   const [mvpCount, setMvpCount] = useState(0);
   const [lastMvpSeason, setLastMvpSeason] = useState(null);
   const [seasonMvpAwarded, setSeasonMvpAwarded] = useState(false);
+  // Circuits : résultats de la période affichée au bilan, et palmarès cumulé de la carrière.
+  const [seasonResults, setSeasonResults] = useState([]);
+  const [palmares, setPalmares] = useState([]);
   const [turnIndex, setTurnIndex] = useState(0);
   const [phase, setPhase] = useState("event");
   const [lastResult, setLastResult] = useState("");
@@ -6210,6 +6402,8 @@ export default function EsportCareerGame() {
     return orderedSequence.filter((e) => !e.requiresFlag || flags[e.requiresFlag.name] === e.requiresFlag.value);
   }, [orderedSequence, flags]);
 
+  const careerLeague = useMemo(() => pickCareerLeague(selectedGame, seed), [selectedGame, seed]);
+
   function resetAll() {
     setScreen("start");
     setDiscipline(null);
@@ -6224,6 +6418,8 @@ export default function EsportCareerGame() {
     setMvpCount(0);
     setLastMvpSeason(null);
     setSeasonMvpAwarded(false);
+    setSeasonResults([]);
+    setPalmares([]);
     setTurnIndex(0);
     setPhase("event");
     setLastResult("");
@@ -6267,6 +6463,7 @@ export default function EsportCareerGame() {
       minStats: minStatsAtEnd,
       age: finalAge,
       mvpCount,
+      palmares,
       endingTitle: endingObj.title,
       endingTone: endingObj.tone,
       reconversionUsed: null,
@@ -6305,7 +6502,7 @@ export default function EsportCareerGame() {
 
     const currentEvent = events[turnIndex];
     const magnitude = Object.values(appliedDeltas).reduce((sum, d) => sum + Math.abs(d), 0);
-    const historyVars = { RIVAL: rival, ALLY: ally, TEAM: teamOffer || team || "", LEAGUE: "" };
+    const historyVars = { RIVAL: rival, ALLY: ally, TEAM: teamOffer || team || "", LEAGUE: careerLeague || "" };
     setChoiceHistory((h) => [
       ...h,
       {
@@ -6368,6 +6565,11 @@ export default function EsportCareerGame() {
         awardCredits(MVP_SEASON_CREDIT_REWARD);
       }
       setSeasonMvpAwarded(awarded);
+      const results = simulateCircuitSeason(selectedGame, stats, team, flags, careerLeague, nextAge - 2);
+      setSeasonResults(results);
+      if (results.length > 0) {
+        setPalmares((p) => [...p, ...results.map((r) => ({ ...r, season: seasonIndex }))]);
+      }
       setPhase("season");
     } else {
       setTurnIndex((i) => i + 1);
@@ -6582,6 +6784,7 @@ export default function EsportCareerGame() {
           growthProfile={growthProfile}
           soundOn={soundOn}
           onToggleSound={handleToggleSound}
+          careerLeague={careerLeague}
         />
       )}
 
@@ -6599,11 +6802,12 @@ export default function EsportCareerGame() {
           onToggleSound={handleToggleSound}
           onContinue={handleContinueFromSeason}
           mvpAwarded={seasonMvpAwarded}
+          results={seasonResults}
         />
       )}
 
       {screen === "end" && ending && (
-        <EndScreen ending={ending} stats={stats} age={age} onRestart={resetAll} rival={rival} team={team} reconversion={flags.reconversion} growthProfile={growthProfile} choiceHistory={choiceHistory} creditsEarned={creditsEarned} statHistory={statHistory} mvpCount={mvpCount} />
+        <EndScreen ending={ending} stats={stats} age={age} onRestart={resetAll} rival={rival} team={team} reconversion={flags.reconversion} growthProfile={growthProfile} choiceHistory={choiceHistory} creditsEarned={creditsEarned} statHistory={statHistory} mvpCount={mvpCount} palmares={palmares} />
       )}
 
       {screen === "coach-game" && coachBase && (
